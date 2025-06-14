@@ -35,3 +35,8 @@ Processing complete. Data saved to Parquet.
 
 Total script execution time: 10.33 seconds
 ```
+
+```bash
+# Upload to S3 option 1 - upload intermediate parquet file
+python upload_to_s3.py <LOCAL_PARQUET_FOLDER_PATH> <YOUR_S3_BUCKET_NAME> --s3-prefix <OPTIONAL_S3_PATH_PREFIX>
+```
