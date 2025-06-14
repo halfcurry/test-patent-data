@@ -1,0 +1,31 @@
+# docker-compose.yml
+version: '3.8' # Specify Docker Compose file format version
+
+services:
+  hupd-processor:
+    build:
+      context: ./go_process_json_to_parquet # Build from the Dockerfile in the current directory
+      dockerfile: Dockerfile
+    container_name: hupd_go_processor # Assign a friendly name to the container
+    volumes:
+      # Mount the input data directory from your host to the container
+      # This assumes hupd_2018_extracted is in the same directory as docker-compose.yml
+      - ./hupd_2018_extracted:/app/hupd_2018_extracted:ro # :ro means read-only for safety
+
+      # Mount the output directory from your host to the container
+      # The Go app writes to 'hupd_2018_processed.parquet/output.parquet'
+      # So, we map the parent directory 'hupd_2018_processed.parquet'
+      - ./hupd_2018_processed.parquet:/app/hupd_2018_processed.parquet # Read/write for output
+    # Optionally, if you want to explicitly run the command
+    # command: ./hupd_processor
+    # However, ENTRYPOINT in Dockerfile handles this effectively.
+
+    # Restart policy (optional, for long-running services)
+    # restart: on-failure
+
+    # Resource limits (optional, good for production/resource constrained envs)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '4' # Example: Limit to 4 CPUs
+    #       memory: 16G # Example: Limit to 16GB RAM

@@ -1,34 +1,40 @@
 // .devcontainer/devcontainer.json
 {
-    "name": "Python 3 & Data Science",
-    "image": "mcr.microsoft.com/devcontainers/python:0-3.10", // Using a Python image (adjust version as needed)
-    // Or you can specify a Dockerfile if you need more custom control:
-    // "build": {
-    //     "dockerfile": "Dockerfile",
-    //     "context": "."
-    // },
-
+    "name": "Python 3 & Data Science with Go and Docker", // Updated name again
+    "image": "mcr.microsoft.com/devcontainers/python:0-3.10",
     "features": {
-        // You can add other features here, e.g., "ghcr.io/devcontainers/features/aws-cli:1": {}
-        // The Python image usually comes with pip and necessary tools.
+        "ghcr.io/devcontainers/features/go:1": {
+            "version": "latest",
+            "golangciLint": true,
+            "goInstallTools": true
+        },
+        // --- ADD THIS FEATURE FOR DOCKER ---
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {
+            "version": "latest" // Use "latest" or a specific version like "2.x.x"
+        }
+        // --- END ADDITION ---
     },
-
     "customizations": {
         "vscode": {
             "extensions": [
                 "ms-python.python",
                 "ms-toolsai.jupyter",
-                "mhutchie.git-graph"
-            ]
+                "mhutchie.git-graph",
+                "golang.go",
+                "ms-azuretools.vscode-docker" // Keep this, it helps VS Code understand Docker context
+            ],
+            "settings": {
+                "go.toolsManagement.autoUpdate": true,
+                "go.lintOnSave": "file",
+                "go.vetOnSave": "file",
+                "editor.formatOnSave": true,
+                "go.formatTool": "goimports",
+                "[go]": {
+                    "editor.defaultFormatter": "golang.go"
+                }
+            }
         }
     },
-
-    // This command runs *after* the container is created and everything is set up.
-    // It's the ideal place to install your Python dependencies.
-    "postCreateCommand": "pip install --no-cache-dir -r .devcontainer/requirements.txt",
-
-    // If your requirements.txt is at the root:
-    // "postCreateCommand": "pip install --no-cache-dir -r requirements.txt",
-
+    "postCreateCommand": "pip install --no-cache-dir -r .devcontainer/requirements.txt && go mod tidy || true",
     "remoteUser": "vscode"
 }
