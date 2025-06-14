@@ -4,12 +4,12 @@ import dask.dataframe as dd
 import dask.bag as db
 from dask.diagnostics import ProgressBar
 import pandas as pd
-import pyarrow as pa
+import pyarrow as pa # Make sure pyarrow is imported
 from dask.distributed import Client, LocalCluster
 import time
+import argparse
 
 # --- CPU OPTIMIZATION: Choose a faster JSON parser if available ---
-# We'll also keep track of which parser was successfully imported to adjust loading logic
 json_parser_name = "default_json"
 try:
     import orjson as json_parser_module
@@ -28,10 +28,8 @@ except ImportError:
 # --- Helper function to load JSON based on the chosen parser ---
 def safe_json_load(f):
     if json_parser_name in ["orjson", "ujson"]:
-        # orjson/ujson require the entire content as string/bytes
         return json_parser_module.loads(f.read())
     else:
-        # Standard json.load works directly with file objects
         return json_parser_module.load(f)
 
 
@@ -46,6 +44,13 @@ def process_hupd_data_dask(input_dir, output_parquet_file, fields_to_drop):
         fields_to_drop (list): A list of field names to drop from each JSON record.
     """
     ALLOWED_DECISION_STATUSES = {"ACCEPTED", "REJECTED"}
+
+    # Ensure output directory exists
+    output_parent_dir = os.path.dirname(output_parquet_file)
+    if output_parent_dir and not os.path.exists(output_parent_dir):
+        os.makedirs(output_parent_dir, exist_ok=True)
+        print(f"Created output directory: {output_parent_dir}")
+
 
     print(f"Scanning for JSON files in {input_dir}...")
     json_filepaths = []
@@ -64,7 +69,7 @@ def process_hupd_data_dask(input_dir, output_parquet_file, fields_to_drop):
     def load_and_filter_json(filepath):
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                record = safe_json_load(f) # <--- Using helper function
+                record = safe_json_load(f) 
                 decision_status = record.get("decision")
 
                 if decision_status is None or \
@@ -76,47 +81,39 @@ def process_hupd_data_dask(input_dir, output_parquet_file, fields_to_drop):
                 for field in fields_to_drop:
                     record.pop(field, None)
                 return record
-        except (json_parser_module.JSONDecodeError, KeyError, Exception) as e: # Use module-specific error
-            print(f"Warning: Could not process {filepath} in Dask Bag map: {e}")
+        except (json_parser_module.JSONDecodeError, KeyError, Exception) as e: 
             return None
 
-    dask_bag = db.from_sequence(json_filepaths, npartitions=os.cpu_count() or 4)
+    num_bag_partitions = os.cpu_count() * 2 if os.cpu_count() else 8 
+    dask_bag = db.from_sequence(json_filepaths, npartitions=num_bag_partitions)
     processed_records_bag = dask_bag.map(load_and_filter_json).filter(lambda x: x is not None)
 
     # --- META INFERENCE for Dask DataFrame ---
+    # We still need a `meta` DataFrame for Dask's internal operations (like knowing column names).
+    # However, the types will be overridden by the explicit `schema` in `to_parquet`.
     sample_record = None
-    print("Attempting to find a valid sample record for schema inference...")
-    num_checked_for_sample = 0
-    for filepath in json_filepaths[:min(100, len(json_filepaths))]:
-        num_checked_for_sample += 1
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                temp_record = safe_json_load(f) # <--- Using helper function
-                
-                if isinstance(temp_record, dict):
-                    for field in fields_to_drop:
-                        temp_record.pop(field, None)
-                    sample_record = temp_record
-                    print(f"Found valid sample record from: {filepath}")
-                    break
-                else:
-                    print(f"DEBUG: File '{filepath}' did not contain a top-level dictionary. Type found: {type(temp_record)}")
-
-        except json_parser_module.JSONDecodeError as e: # Use module-specific error
-            print(f"DEBUG: JSONDecodeError in sample inference for '{filepath}': {e}")
-        except Exception as e:
-            print(f"DEBUG: Other error in sample inference for '{filepath}': {e}")
-
-    if sample_record is None:
-        print(f"ERROR: Could not find a valid sample record after checking {num_checked_for_sample} files. Exiting.")
+    print("Attempting to find a valid sample record for schema inference (checking up to 10 files)...")
+    
+    # Use .take() to get a few samples efficiently from the *processed* bag
+    sample_records_list = processed_records_bag.take(10, npartitions=min(10, processed_records_bag.npartitions))
+    
+    if sample_records_list and len(sample_records_list) > 0:
+        sample_record = sample_records_list[0] # Take the first valid record
+        print(f"Found valid sample record.")
+    else:
+        print(f"ERROR: Could not find any valid sample records. This might indicate an issue with input data or filtering logic. Exiting.")
         return
 
+    # Create a Pandas DataFrame from the sample record to use as `meta`
+    # The actual types in this meta_df don't need to perfectly match PyArrow's
+    # complex types as we will provide the explicit PyArrow schema.
     meta_df = pd.DataFrame([sample_record])
     ddf = processed_records_bag.to_dataframe(meta=meta_df)
 
     print(f"Saving filtered data to Parquet format: {output_parquet_file}...")
 
     # --- EXPLICIT PYARROW SCHEMA DEFINITION ---
+    # This is the fix! Use this precise schema to ensure Dask/PyArrow writes correctly.
     parquet_schema = pa.schema([
         pa.field('application_number', pa.string()),
         pa.field('publication_number', pa.string()),
@@ -125,9 +122,9 @@ def process_hupd_data_dask(input_dir, output_parquet_file, fields_to_drop):
         pa.field('date_produced', pa.string()),
         pa.field('date_published', pa.string()),
         pa.field('main_cpc_label', pa.string()),
-        pa.field('cpc_labels', pa.list_(pa.string())),
+        pa.field('cpc_labels', pa.list_(pa.string())), # Corrected: list of strings
         pa.field('main_ipcr_label', pa.string()),
-        pa.field('ipcr_labels', pa.list_(pa.string())),
+        pa.field('ipcr_labels', pa.list_(pa.string())), # Corrected: list of strings
         pa.field('patent_number', pa.string()),
         pa.field('filing_date', pa.string()),
         pa.field('patent_issue_date', pa.string()),
@@ -138,6 +135,7 @@ def process_hupd_data_dask(input_dir, output_parquet_file, fields_to_drop):
         pa.field('examiner_name_last', pa.string()),
         pa.field('examiner_name_first', pa.string()),
         pa.field('examiner_name_middle', pa.string()),
+        # Corrected: list of structs for inventor_list
         pa.field('inventor_list', pa.list_(pa.struct([
             pa.field('inventor_city', pa.string()),
             pa.field('inventor_country', pa.string()),
@@ -151,47 +149,62 @@ def process_hupd_data_dask(input_dir, output_parquet_file, fields_to_drop):
     ])
 
     with ProgressBar():
-        ddf.to_parquet(output_parquet_file, write_index=False, schema=parquet_schema)
+        ddf.to_parquet(output_parquet_file, write_index=False, schema=parquet_schema, compression='snappy')
+        print(f"Data saved to Parquet directory: {output_parquet_file}")
+        print("Note: Dask writes multiple part files into the specified path, treating it as a directory.")
+
 
     print("\n--- Processing Summary ---")
     print(f"Total JSON files scanned: {total_files_scanned}")
     
-    # try:
-    #     num_records_in_parquet = ddf.shape[0].compute()
-    #     print(f"Total records sent to Parquet (after filtering): {num_records_in_parquet}")
-    #     print(f"Number of records filtered out: {total_files_scanned - num_records_in_parquet}")
-    # except Exception as e:
-    #     print(f"Could not compute final record count: {e}")
-    #     print("Note: Computing `ddf.shape[0]` can re-trigger computations on large datasets.")
-
     print("Processing complete. Data saved to Parquet.")
     print(f"Number of Dask DataFrame partitions used: {ddf.npartitions}")
 
 if __name__ == "__main__":
     start_time = time.time()
 
+    parser = argparse.ArgumentParser(
+        description="Process HUPd JSON data using Dask and save to Parquet."
+    )
+    parser.add_argument(
+        "year",
+        type=str,
+        nargs='?', 
+        default="2018", 
+        help="The year of the HUPd dataset to process (e.g., '2018', '2019'). Defaults to 2018."
+    )
+    args = parser.parse_args()
+
+    num_cores = os.cpu_count() or 4
+    total_memory_gb = 16 
+    memory_per_worker = f"{int(total_memory_gb / num_cores)}GB" 
+
     client = None
     try:
         cluster = LocalCluster(
-            n_workers=os.cpu_count() or 4,
-            processes=True,
-            memory_limit='4GB',
+            n_workers=num_cores,
+            processes=True, 
+            memory_limit=memory_per_worker, 
         )
         client = Client(cluster)
         print(f"Dask client dashboard link: {client.dashboard_link}")
         print(f"Dask client configured with {len(client.scheduler_info()['workers'])} workers.")
-    except Exception as e:
-        print(f"Warning: Could not start Dask client for optimal performance: {e}. Falling back to default scheduler.")
-        print("Consider checking Dask installation or resource availability.")
+        print(f"Each worker has a memory limit of {memory_per_worker}.")
 
-    input_directory = "hupd_2018_extracted/2018"
-    output_parquet = "hupd_2018_processed.parquet"
+    except Exception as e:
+        print(f"Warning: Could not start Dask client for optimal performance: {e}.")
+        print("Falling back to default scheduler (might be less efficient).")
+
+    input_directory = os.path.join("hupd_extracted", args.year)
+    output_parquet = os.path.join("hupd_processed", f"{args.year}.parquet")
+    
     fields_to_remove = ["claims", "background"]
 
     process_hupd_data_dask(input_directory, output_parquet, fields_to_remove)
 
     if client:
         client.close()
+        cluster.close() 
         print("Dask client and cluster closed.")
     
     end_time = time.time()
