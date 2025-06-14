@@ -1,31 +1,38 @@
 # docker-compose.yml
-version: '3.8' # Specify Docker Compose file format version
+version: '3.8'
 
 services:
+  hupd-downloader:
+    build:
+      context: ./download_and_extract_hupd # Assuming this path is correct relative to docker-compose.yml
+      dockerfile: Dockerfile
+    container_name: hupd_data_downloader
+    environment:
+      - HUPD_DATA_YEAR=2004 # Change this to 2019, 2020, etc., to download different years
+    volumes:
+      - ./hf_cache:/app/hf_cache
+      - ./hupd_extracted:/app/hupd_extracted # Output will be in /app/hupd_extracted/YEAR/
+    restart: "no" # Ensures the container exits once its job is done
+
   hupd-processor:
     build:
-      context: ./go_process_json_to_parquet # Build from the Dockerfile in the current directory
+      context: ./go_process_json_to_parquet # Assuming this path is correct relative to docker-compose.yml
       dockerfile: Dockerfile
-    container_name: hupd_go_processor # Assign a friendly name to the container
+    container_name: hupd_go_processor
+    # --- ADDED DEPENDENCY ---
+    depends_on:
+      hupd-downloader:
+        condition: service_completed_successfully # Ensures downloader finishes successfully before processor starts
+    # --- END ADDED DEPENDENCY ---
     volumes:
-      # Mount the input data directory from your host to the container
-      # This assumes hupd_2018_extracted is in the same directory as docker-compose.yml
-      - ./hupd_2018_extracted:/app/hupd_2018_extracted:ro # :ro means read-only for safety
-
-      # Mount the output directory from your host to the container
-      # The Go app writes to 'hupd_2018_processed.parquet/output.parquet'
-      # So, we map the parent directory 'hupd_2018_processed.parquet'
-      - ./hupd_2018_processed.parquet:/app/hupd_2018_processed.parquet # Read/write for output
-    # Optionally, if you want to explicitly run the command
-    # command: ./hupd_processor
-    # However, ENTRYPOINT in Dockerfile handles this effectively.
-
-    # Restart policy (optional, for long-running services)
-    # restart: on-failure
-
-    # Resource limits (optional, good for production/resource constrained envs)
-    # deploy:
-    #   resources:
-    #     limits:
-    #       cpus: '4' # Example: Limit to 4 CPUs
-    #       memory: 16G # Example: Limit to 16GB RAM
+      # Map the hupd_extracted folder from the downloader into the processor.
+      # The downloader puts files into /app/hupd_extracted/2018 (e.g.)
+      # The processor expects HUPD_INPUT_DIR to point to /app/hupd_2018_extracted/2018
+      # So, the mount should be: ./hupd_extracted (host) -> /app/hupd_2018_extracted (container)
+      - ./hupd_extracted:/app/hupd_2018_extracted:ro # Mount as read-only for input
+      - ./hupd_processed.parquet:/app/hupd_2018_processed.parquet # For output
+    environment:
+      # These paths reference the container's internal paths as defined by the volumes
+      - HUPD_INPUT_DIR=/app/hupd_2018_extracted/2018 # Path inside the container where 2018 data is
+      - HUPD_OUTPUT_FILE=/app/hupd_2018_processed.parquet/output.parquet
+    restart: "no" # Ensures the container exits once its job is done

@@ -16,7 +16,7 @@ import (
 	"github.com/xitongsys/parquet-go/writer"
 )
 
-// --- Data Structures (equivalent to your PyArrow Schema and Python dicts) ---
+// --- Data Structures (unchanged) ---
 
 // Inventor struct maps to the nested 'inventor_list' items
 type Inventor struct {
@@ -28,8 +28,6 @@ type Inventor struct {
 }
 
 // PatentRecord struct maps directly to your PyArrow schema
-// Use `parquet:"name=..."` tags for Parquet column mapping
-// Use `json:"..."` tags for JSON unmarshaling
 type PatentRecord struct {
 	ApplicationNumber  string     `json:"application_number" parquet:"name=application_number,type=BYTE_ARRAY,convertedtype=UTF8,encoding=PLAIN_DICTIONARY"`
 	PublicationNumber  string     `json:"publication_number" parquet:"name=publication_number,type=BYTE_ARRAY,convertedtype=UTF8,encoding=PLAIN_DICTIONARY"`
@@ -60,11 +58,11 @@ type PatentRecord struct {
 // Global counters and mutexes for statistics
 var (
 	totalFilesScanned        int64
-	processedRecordsCount    int64 // Count of records *after* filtering by decision status, before deduplication
+	processedRecordsCount    int64
 	filteredOutCount         int64
-	deduplicatedRecordsCount int64          // New counter for records written to Parquet
-	wg                       sync.WaitGroup // For waiting on all processing goroutines to finish
-	mu                       sync.Mutex     // For protecting shared counters/maps
+	deduplicatedRecordsCount int64
+	wg                       sync.WaitGroup
+	mu                       sync.Mutex
 )
 
 // Allowed decision statuses
@@ -76,9 +74,7 @@ var allowedDecisionStatuses = map[string]struct{}{
 // worker processes a single file, filters it, and sends valid records to the results channel.
 func worker(id int, filepaths <-chan string, results chan<- PatentRecord) {
 	defer wg.Done()
-	// fmt.Printf("Worker %d started.\n", id) // Commented out to reduce console noise
 	for filepath := range filepaths {
-		// Increment total scanned count
 		mu.Lock()
 		totalFilesScanned++
 		mu.Unlock()
@@ -87,7 +83,7 @@ func worker(id int, filepaths <-chan string, results chan<- PatentRecord) {
 		if err != nil {
 			fmt.Printf("Warning: Worker %d could not read %s: %v\n", id, filepath, err)
 			mu.Lock()
-			filteredOutCount++ // Count as filtered out due to read error
+			filteredOutCount++
 			mu.Unlock()
 			continue
 		}
@@ -97,7 +93,7 @@ func worker(id int, filepaths <-chan string, results chan<- PatentRecord) {
 		if err != nil {
 			fmt.Printf("Warning: Worker %d could not parse JSON %s: %v\n", id, filepath, err)
 			mu.Lock()
-			filteredOutCount++ // Count as filtered out due to parse error
+			filteredOutCount++
 			mu.Unlock()
 			continue
 		}
@@ -118,8 +114,6 @@ func worker(id int, filepaths <-chan string, results chan<- PatentRecord) {
 			continue
 		}
 
-		// Re-marshal and unmarshal into the strict PatentRecord struct
-		// This handles dropping fields not defined in PatentRecord struct.
 		processedData, _ := json.Marshal(record)
 		var patentRecord PatentRecord
 		err = json.Unmarshal(processedData, &patentRecord)
@@ -131,12 +125,11 @@ func worker(id int, filepaths <-chan string, results chan<- PatentRecord) {
 			continue
 		}
 
-		results <- patentRecord // Send valid record to results channel
+		results <- patentRecord
 		mu.Lock()
-		processedRecordsCount++ // This counts records *before* deduplication
+		processedRecordsCount++
 		mu.Unlock()
 	}
-	// fmt.Printf("Worker %d finished.\n", id) // Commented out to reduce console noise
 }
 
 // collectFilePaths recursively finds all .json files in a directory.
@@ -157,14 +150,24 @@ func collectFilePaths(inputDir string) ([]string, error) {
 func main() {
 	startTime := time.Now()
 
-	inputDirectory := "hupd_2018_extracted/2018"
-	// Ensure the output directory exists
-	outputDir := filepath.Dir("hupd_2018_processed.parquet/output.parquet")
+	// --- Read input and output directories/files from environment variables ---
+	inputDirectory := os.Getenv("HUPD_INPUT_DIR")
+	if inputDirectory == "" {
+		inputDirectory = "hupd_2018_extracted/2018" // Default input directory
+	}
+
+	outputParquetFile := os.Getenv("HUPD_OUTPUT_FILE")
+	if outputParquetFile == "" {
+		outputParquetFile = "hupd_2018_processed.parquet/output.parquet" // Default output file path
+	}
+	// --- End environment variable reading ---
+
+	// Ensure the output directory for the single file exists
+	outputDir := filepath.Dir(outputParquetFile)
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		fmt.Printf("Error creating output directory %s: %v\n", outputDir, err)
 		return
 	}
-	outputParquetFile := "hupd_2018_processed.parquet/output.parquet"
 
 	fmt.Printf("Scanning for JSON files in %s...\n", inputDirectory)
 	jsonFilepaths, err := collectFilePaths(inputDirectory)
@@ -180,31 +183,28 @@ func main() {
 
 	fmt.Printf("Found %d JSON files. Starting Go processing...\n", len(jsonFilepaths))
 
-	numWorkers := runtime.NumCPU() // Use number of CPU cores as workers
+	numWorkers := runtime.NumCPU()
 	if numWorkers == 0 {
-		numWorkers = 4 // Fallback if runtime.NumCPU returns 0 (unlikely)
+		numWorkers = 4
 	}
 	fmt.Printf("Using %d worker goroutines.\n", numWorkers)
 
-	// Create channels for tasks (filepaths) and results (PatentRecords)
-	filepathsChan := make(chan string, numWorkers*2)     // Buffered channel for tasks
-	resultsChan := make(chan PatentRecord, numWorkers*2) // Buffered channel for results
+	filepathsChan := make(chan string, numWorkers*2)
+	resultsChan := make(chan PatentRecord, numWorkers*2)
 
-	// Start worker goroutines
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1) // Increment WaitGroup counter for each worker
+		wg.Add(1)
 		go worker(i, filepathsChan, resultsChan)
 	}
 
-	// Start a goroutine to feed filepaths into the filepathsChan
 	go func() {
 		for _, fp := range jsonFilepaths {
 			filepathsChan <- fp
 		}
-		close(filepathsChan) // Close the channel to signal workers no more tasks are coming
+		close(filepathsChan)
 	}()
 
-	// Set up Parquet writer
+	// --- Single Parquet Writer Management ---
 	fw, err := local.NewLocalFileWriter(outputParquetFile)
 	if err != nil {
 		fmt.Printf("Can't create local file writer: %v\n", err)
@@ -212,15 +212,16 @@ func main() {
 	}
 	defer fw.Close() // Ensure the file writer is closed when main exits
 
-	// Create Parquet writer for PatentRecord struct
-	pw, err := writer.NewParquetWriter(fw, new(PatentRecord), int64(numWorkers))
+	// Optimize: Set a good row group size for the single output file
+	const desiredRowGroupRows int64 = 100000 // A good starting point for row group size in rows
+
+	pw, err := writer.NewParquetWriter(fw, new(PatentRecord), desiredRowGroupRows)
 	if err != nil {
 		fmt.Printf("Can't create parquet writer: %v\n", err)
 		return
 	}
 
-	// Set Parquet properties (e.g., compression)
-	pw.CompressionType = parquet.CompressionCodec_SNAPPY
+	pw.CompressionType = parquet.CompressionCodec_SNAPPY // Keep SNAPPY compression
 
 	// Start a goroutine to collect results, deduplicate, and write to Parquet
 	var writerWg sync.WaitGroup
@@ -228,27 +229,25 @@ func main() {
 	go func() {
 		defer writerWg.Done()
 
-		seenApplicationNumbers := make(map[string]struct{}) // To track seen application numbers
+		seenApplicationNumbers := make(map[string]struct{})
 		duplicatesFound := 0
 
 		for record := range resultsChan {
 			if _, seen := seenApplicationNumbers[record.ApplicationNumber]; seen {
-				// This application number has already been processed and written
 				duplicatesFound++
-				continue // Skip writing this duplicate
+				continue
 			}
-
-			// If not seen, mark as seen and write
 			seenApplicationNumbers[record.ApplicationNumber] = struct{}{}
+
 			if err = pw.Write(record); err != nil {
 				fmt.Printf("Error writing record to parquet: %v\n", err)
 			} else {
 				mu.Lock()
-				deduplicatedRecordsCount++ // Increment count for *actually written* records
+				deduplicatedRecordsCount++
 				mu.Unlock()
 			}
 		}
-		// Log the duplicates found during writing phase
+
 		if duplicatesFound > 0 {
 			fmt.Printf("Deduplication: Skipped %d duplicate records based on 'application_number'.\n", duplicatesFound)
 		}
@@ -258,16 +257,15 @@ func main() {
 		}
 	}()
 
-	wg.Wait()          // Wait for all worker goroutines to finish
-	close(resultsChan) // Close the results channel to signal the writer goroutine
-	writerWg.Wait()    // Wait for the Parquet writer goroutine to finish
+	wg.Wait()
+	close(resultsChan)
+	writerWg.Wait()
 
 	fmt.Println("\n--- Processing Summary ---")
 	fmt.Printf("Total JSON files scanned: %d\n", totalFilesScanned)
 	fmt.Printf("Total records processed by workers (before deduplication): %d\n", processedRecordsCount)
 	fmt.Printf("Total records filtered out by worker logic (decision status, parsing errors): %d\n", filteredOutCount)
 	fmt.Printf("Total records written to Parquet (after deduplication): %d\n", deduplicatedRecordsCount)
-	// You can infer "duplicates removed" as: processedRecordsCount - deduplicatedRecordsCount
 
 	fmt.Println("Processing complete. Data saved to Parquet.")
 
