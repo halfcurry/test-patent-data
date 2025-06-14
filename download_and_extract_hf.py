@@ -21,7 +21,8 @@ def download_and_extract_hupd(repo_id, filename, download_dir, extract_dir):
         downloaded_filepath = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
-            cache_dir=download_dir # You can specify a custom cache directory
+            cache_dir=download_dir, # You can specify a custom cache directory,
+            repo_type="dataset"
         )
         print(f"File downloaded to: {downloaded_filepath}")
     except Exception as e:

@@ -1,5 +1,10 @@
 pandas
-pyarrow
+pyarrow>=14.0.0
 tqdm
 boto3
-huggingface_hub
+huggingface_hub>=0.17.0
+dask[dataframe] # Install dask with dataframe dependencies
+dask[distributed]
+fsspec          # File system capabilities for Dask
+orjson
+ujson
